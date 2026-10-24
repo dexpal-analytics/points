@@ -90,12 +90,14 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         super._update(from, to, ids, values);
     }
 
+    /// allows any contract (i.e. don't need IERC1155Receiver implemented)
     function _updateWithAcceptanceCheck(
         address from,
         address to,
         uint256[] memory ids,
         uint256[] memory values,
-        bytes memory _data
+        bytes memory _data,
+        bool
     ) internal override {
         _update(from, to, ids, values);
     }
@@ -135,6 +137,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
 
     function increaseCredits(Credit[] calldata entries, bytes32 batchId) external nonReentrant onlyWriter {
         require(state == State.Open, "state is not open");
+        require(!processed[batchId], "bathc already processed");
         for (uint256 i; i < entries.length; ++i) {
             Credit calldata c = entries[i];
             if (bans.contains(c.user)) continue;
