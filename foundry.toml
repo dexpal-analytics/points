@@ -1,0 +1,26 @@
+[profile.default]
+libs = ["dependencies"]
+ignored_warnings_from = ["dependencies"]
+evm_version = "cancun"
+optimizer = true
+remappings = [
+    "forge-std/=dependencies/forge-std-1.17.0/src/",
+    "@openzeppelin/contracts/=dependencies/@openzeppelin-contracts-5.7.0/",
+    "@openzeppelin/contracts-upgradeable/=dependencies/@openzeppelin-contracts-upgradeable-5.7.0/",
+]
+
+[lint]
+# No external calls, and a zero writer is the pause.
+exclude_lints = ["reentrancy-events", "missing-zero-check"]
+
+[rpc_endpoints]
+robinhood = "https://rpc.mainnet.chain.robinhood.com"
+robinhood_testnet = "https://rpc.testnet.chain.robinhood.com"
+
+[dependencies]
+forge-std = "1.17.0"
+"@openzeppelin-contracts" = "5.7.0"
+"@openzeppelin-contracts-upgradeable" = "5.7.0"
+
+[soldeer]
+remappings_generate = false
