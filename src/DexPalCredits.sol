@@ -35,6 +35,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
     }
 
     mapping(Kind kind => uint256) public budget;
+    mapping(bytes32 batchId => bool) public processed;
 
     struct Credit {
         address user;
@@ -132,7 +133,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         }
     }
 
-    function increaseCredits(Credit[] calldata entries) external nonReentrant onlyWriter {
+    function increaseCredits(Credit[] calldata entries, bytes32 batchId) external nonReentrant onlyWriter {
         require(state == State.Open, "state is not open");
         for (uint256 i; i < entries.length; ++i) {
             Credit calldata c = entries[i];
@@ -141,6 +142,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
             _mint(c.user, id, c.amount, abi.encodePacked(c.dex));
             emit CreditsIncreased(roundName, c.user, c.dex, c.kind, c.amount);
         }
+        processed[batchId] = true;
     }
 
     /// called by the points contract
