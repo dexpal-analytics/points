@@ -11,14 +11,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 interface IDexPalCredits {
     function pointsBalanceOf(address user) external view returns (uint256);
     function withdrawPoints(address user) external;
+    function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external;
+    function closeRound() external;
+    function banUser(address user) external;
 }
 
 contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, ReentrancyGuard {
     using EnumerableSet for EnumerableSet.AddressSet;
 
     enum State {
-        Open,
-        Closed
+        Closed,
+        Open
     }
 
     enum Kind {
@@ -51,6 +54,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
     event RoundOpened(bytes16 indexed round, uint256[3] budget);
     event RoundClosed(bytes16 indexed round);
     event CreditsSet(bytes16 indexed round, address indexed user, bytes32 indexed dex, Kind kind, uint256 amount);
+    event CreditsIncreased(bytes16 indexed round, address indexed user, bytes32 indexed dex, Kind kind, uint256 amount);
     event Disqualified(bytes16 indexed round, address indexed user, bool banned);
 
     constructor(address _owner, address _writer, string memory _uri) Ownable(_owner) ERC1155(_uri) {
@@ -73,12 +77,21 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         _;
     }
 
+    modifier nonBannedUser(address user) {
+        require(!bans.contains(user), "user is banned");
+        _;
+    }
+
     function updateWriter(address newWriter) public onlyOwner {
         writer = newWriter;
         emit WriterSet(newWriter);
     }
 
-    function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external nonReentrant onlyOwner {
+    function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external nonReentrant onlyPointsContract {
+        for  (uint8 i; i < 3; ++i) { 
+        require(totalSupply(id);)
+        }
+
         require(state == State.Closed, "call closeRound first");
         roundName = _roundName;
         for (uint8 i; i < 3; ++i) {
@@ -88,14 +101,28 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         state = State.Open;
     }
 
+    /// be careful, if a user has transferred credits to someone, this will oversupply
     function setCredits(Credit[] calldata entries) external nonReentrant onlyWriter {
+        require(state == State.Open, "state is not open");
         for (uint256 i; i < entries.length; ++i) {
             Credit calldata c = entries[i];
+            if (bans.contains(c.user)) continue;
             uint256 id = uint256(c.kind);
             uint256 oldBalance = balanceOf(c.user, id);
             _burn(c.user, id, oldBalance);
             _mint(c.user, id, c.amount, abi.encodePacked(c.dex));
             emit CreditsSet(roundName, c.user, c.dex, c.kind, c.amount);
+        }
+    }
+
+    function increaseCredits(Credit[] calldata entries) external nonReentrant onlyWriter {
+        require(state == State.Open, "state is not open");
+        for (uint256 i; i < entries.length; ++i) {
+            if (bans.contains(c.user)) continue;
+            Credit calldata c = entries[i];
+            uint256 id = uint256(c.kind);
+            _mint(c.user, id, c.amount, abi.encodePacked(c.dex));
+            emit CreditsIncreased(roundName, c.user, c.dex, c.kind, c.amount);
         }
     }
 
@@ -107,16 +134,26 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         for (uint256 id; id < 3; ++id) {
             uint256 userCredits = balanceOf(user, id);
             uint256 totalCredits = totalSupply(id);
+            if (totalCredits == 0) {
+                continue;
+            }
             pointsBalance += Math.mulDiv(budget[Kind(id)], userCredits, totalCredits);
         }
         return pointsBalance;
     }
 
     /// called by the points contract before issuing the user's points
-    function withdrawPoints(address user) public nonReentrant onlyPointsContract {
+    function withdrawPoints(address user) public nonReentrant onlyPointsContract nonBannedUser(user) {
         require(state == State.Closed, "state needs to be closed");
+        _withdrawPoints(user);
+    }
+
+    function _withdrawPoints(address user) internal {
         for (uint256 id; id < 3; ++id) {
+            if (totalSupply(id) == 0) continue;
             uint256 oldBalance = balanceOf(user, id);
+            uint256 p = Math.mulDiv(budget[Kind(id)], oldBalance, totalSupply(id));
+            budget[Kind(id)] -= p;
             _burn(user, id, oldBalance);
         }
     }
@@ -128,7 +165,11 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
 
     function banUser(address user) external nonReentrant onlyPointsContract {
         bans.add(user);
-        withdrawPoints(user);
+        for (uint256 id; id < 3; ++id) {
+            if (totalSupply(id) == 0) continue;
+            uint256 oldBalance = balanceOf(user, id);
+            _burn(user, id, oldBalance);
+        }
     }
 }
 

@@ -47,8 +47,11 @@ contract DexPalPoints is ERC20, Ownable2Step, ReentrancyGuard {
     }
 
     function claimPoints(address from, address to) public nonReentrant {
+        require(msg.sender == from, "only the owner of the points can call this");
         uint256 numeraireToTransfer = balanceOfConverted(from);
-        bool success = IERC20(numeraire).transfer(to, numeraireToTransfer);
+        uint256 balance = balanceOf(from);
+        _burn(from, balance);
+        bool success = ERC20(numeraire).transfer(to, numeraireToTransfer);
         require(success, "Points Claim Failed");
     }
 
@@ -58,15 +61,32 @@ contract DexPalPoints is ERC20, Ownable2Step, ReentrancyGuard {
         _mint(user, points);
     }
 
-    function balanceOf(address user) public view override returns (uint256) {
-        uint256 balanceHere = IERC20(address(this)).balanceOf(user);
+    function predictedBalanceOf(address user) public view returns (uint256) {
+        uint256 balanceHere = super.balanceOf(user);
         uint256 balanceInCredits = IDexPalCredits(creditsContractAddress).pointsBalanceOf(user);
         return balanceHere + balanceInCredits;
+    }
+
+    function predictedBalanceOfConverted(address user) public view returns (uint256) {
+        uint256 userPoints = predictedBalanceOf(user);
+        return IPointsConversion(pointsConversion).convertPoints(userPoints);
     }
 
     function balanceOfConverted(address user) public view returns (uint256) {
         uint256 userPoints = balanceOf(user);
         return IPointsConversion(pointsConversion).convertPoints(userPoints);
+    }
+
+    function banUser(address user) external nonReentrant onlyOwner {
+        IDexPalCredits(creditsContractAddress).banUser(user);
+    }
+
+    function closeRound() external nonReentrant onlyOwner {
+        IDexPalCredits(creditsContractAddress).closeRound();
+    }
+
+    function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external nonReentrant onlyOwner {
+        IDexPalCredits(creditsContractAddress).openRound(_roundName, newBudget);
     }
 }
 
