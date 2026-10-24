@@ -17,8 +17,8 @@ Points figures estimated until the round ends.
 
 ## Contract Addresses Robinhood Testnet
 
-- Points Contract: 0xcbfb4f85eedcf32b94b2db6121588ac508d0ef05
-- Credits Contract: 0x384d86a09fa21fd010223ceb8bf04b3025d86e92
+- DexPalPoints 0x236cB56b71942a78a93F1494a00E48C67b5CB4dC  
+- DexPalCredits 0x41029D3DcA18827E80d726f5E6577e65B05df9Ea
 
 ## Rounds
 

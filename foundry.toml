@@ -1,5 +1,5 @@
 [profile.default]
-solc = "0.8.38"
+solc = "0.8.36"
 libs = ["dependencies"]
 ignored_warnings_from = ["dependencies"]
 evm_version = "cancun"
