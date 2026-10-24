@@ -7,6 +7,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IDexPalCredits} from "./DexPalCredits.sol";
 
 interface IPointsConversion {
     function convertPoints(uint256 points) external pure returns (uint256);
@@ -18,12 +19,12 @@ contract DexPalPoints is ERC20, Ownable2Step, ReentrancyGuard {
     address public creditsContractAddress;
 
     event NumeraireChanged(address newNumeraire);
-    event PointsConversionChanget(address newPointsConversion);
+    event PointsConversionChanged(address newPointsConversion);
     event CreditsContractAddressChanged(address newCreditsContract);
 
     constructor(address numeraire_, address _owner, address pointsConversion_, address creditsContractAddress_)
-        ERC20("DexPalPoints", "DPP")
         Ownable(_owner)
+        ERC20("DexPalPoints", "DPP")
     {
         numeraire = numeraire_;
         pointsConversion = pointsConversion_;
@@ -51,9 +52,16 @@ contract DexPalPoints is ERC20, Ownable2Step, ReentrancyGuard {
         require(success, "Points Claim Failed");
     }
 
-    function mintPoints(address to, uint256 amount) external {
-        require((msg.sender) == creditsContractAddress, "only credits contract can call this");
-        _mint(to, amount);
+    function issuePoints(address user) external nonReentrant onlyOwner {
+        uint256 points = IDexPalCredits(creditsContractAddress).pointsBalanceOf(user);
+        IDexPalCredits(creditsContractAddress).withdrawPoints(user);
+        _mint(user, points);
+    }
+
+    function balanceOf(address user) public view override returns (uint256) {
+        uint256 balanceHere = IERC20(address(this)).balanceOf(user);
+        uint256 balanceInCredits = IDexPalCredits(creditsContractAddress).pointsBalanceOf(user);
+        return balanceHere + balanceInCredits;
     }
 
     function balanceOfConverted(address user) public view returns (uint256) {
