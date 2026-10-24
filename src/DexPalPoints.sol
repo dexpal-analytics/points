@@ -101,7 +101,7 @@ contract DexPalPoints is Ownable2StepUpgradeable, UUPSUpgradeable {
             credits[round][c.user][c.kind][c.dex] = c.amount;
             // Overwrites, so every total moves by the difference and a resent batch changes nothing.
             setUserCredits(round, c.user, c.kind, c.amount);
-            /// big problem; a credit reduces in value throughout the liftime as more ar minted.
+            /// big problem; a credit reduces in value throughout the lifetime as more are minted.
             //-is this intentional???
             r.total[k] = r.total[k] - old + c.amount;
             if (c.kind == Kind.Trading) dexCredits[round][c.dex] = dexCredits[round][c.dex] - old + c.amount;

@@ -10,33 +10,44 @@ As an improvement to our rewards system, we are moving the points accounting on 
 
 A round has a Points budget for each source of Credit: trading, quest and referral.
 
-Each budget is
-shared among the wallets that hold that kind of Credit, in proportion to their Credits:
+Each budget is shared among the wallets that hold that kind of Credit, in proportion to their
+Credits:
 
 ```
-points(round, wallet) = Σ over kinds of  budget[kind] × credits(wallet, kind) / total credits(kind)
+points(round, wallet) = Σ over kinds of budget[kind] × credits(wallet, kind) / total credits(kind)
 ```
 
-Points figures estimated until the round ends.
+Points figures are estimates until the round closes.
 
-## Contract Addresses Robinhood Testnet
+Kinds are `0` = Trading, `1` = Quest, `2` = Referral.
 
-- DexPalPoints 0x236cB56b71942a78a93F1494a00E48C67b5CB4dC  
-- DexPalCredits 0x41029D3DcA18827E80d726f5E6577e65B05df9Ea
+## Deployments
+
+Robinhood Chain testnet (chain id 46630). Each contract is an exact match on Sourcify.
+
+| Contract | Address |
+|---|---|
+| DexPalPoints | [`0x83bF918864bc1342c71f240f531b30AE557B15D4`](https://explorer.testnet.chain.robinhood.com/address/0x83bF918864bc1342c71f240f531b30AE557B15D4) |
+| DexPalCredits | [`0x0Bbbb0B97F168cD9188Fe2Be242557c6D69D82B9`](https://explorer.testnet.chain.robinhood.com/address/0x0Bbbb0B97F168cD9188Fe2Be242557c6D69D82B9) |
+| PointsConversion | [`0x4Bd95ba7197C8e7189c56F8dD040818f873098A6`](https://explorer.testnet.chain.robinhood.com/address/0x4Bd95ba7197C8e7189c56F8dD040818f873098A6) |
+| Test numeraire (NUM, public mint) | [`0x276a9590b865307BF0e6b1571B9b702F27C8e620`](https://explorer.testnet.chain.robinhood.com/address/0x276a9590b865307BF0e6b1571B9b702F27C8e620) |
+
+The testnet rate is a placeholder: `UNITS_PER_POINT` is 1e16, so one Point pays 0.01 NUM.
 
 ## Rounds
 
 | Call | Who | Does |
 |---|---|---|
-| `openRound([trading, quest, referral])` | owner | Opens a round with its budgets |
-| `increaseCredits([(wallet, kind, dex, credits), ...])` | writer | updates Credits (while the round is open) |
-| `ban(wallet)` | owner or writer | Voids the wallet's Points (+ban) |
-| `closeRound(round)` | owner | Freezes the round. Its Points become final, and the credits are burned |
+| `openRound(name, [trading, quest, referral])` | owner | Opens a round with its budgets |
+| `setCredits([(wallet, kind, dex, credits), ...])` | writer | Sets each wallet's Credits of a kind (while the round is open) |
+| `increaseCredits([(wallet, kind, dex, credits), ...], batchId)` | writer | Adds Credits once per batch id (while the round is open) |
+| `banUser(wallet)` | owner | Burns the wallet's Credits and bans it for good (while the round is open) |
+| `closeRound()` | owner | Freezes the round. Its Points become final |
+| `issuePoints([wallet, ...])` | anyone | After the close, burns each wallet's Credits and mints its Points; a banned wallet gets 0. At most 400 wallets per transaction under a 32M gas cap |
+| `claimPoints(from, to)` | the wallet `from` | Burns all of `from`'s Points and pays `to` their value in the numeraire |
+| `sweep(token, to, amount)` | owner | Moves a token out; for the numeraire, only the surplus above what is issued and owed |
 
-A disqualified wallet's share is not reallocated in the current round.
-
-IDs are `0` trading, `1` quest,
-`2` referral.
+A banned wallet's share goes to the rest of the round.
 
 ## Reading
 
@@ -49,7 +60,7 @@ IDs are `0` trading, `1` quest,
 | `balanceOf(wallet)` | Points already issued and claimable now |
 | `balanceOfConverted(wallet)` | The numeraire a claim would pay out right now |
 | `totalSupply()` | All issued, unclaimed Points |
-| `numeraire()`, `pointsConversion()`, `creditsContractAddress()` | The payout token, the conversion contract and the linked Credits contract |
+| `numeraire()`, `pointsConversion()`, `creditsContractAddress()` | The payout token, the conversion contract and the linked Credits contract, fixed at deploy |
 
 **DexPalCredits**
 
@@ -60,15 +71,16 @@ IDs are `0` trading, `1` quest,
 | `balanceOf(wallet, kind)` | A wallet's Credits of one kind in the current round |
 | `totalSupply(kind)` | All outstanding Credits of one kind |
 | `processed(batchId)` | Whether a credit batch has already been applied |
-| `writer()`, `pointsContractAddress()` | The backend writer and the linked Points contract |
-
-Kinds are `0` = Trading, `1` = Quest, `2` = Referral.
+| `writer()`, `pointsContractAddress()` | The backend writer and the linked Points contract, fixed at deploy |
+| `isBanned(wallet)`, `bannedUsers()` | Whether a wallet is banned, and every banned wallet |
+| `owedPoints()` | The Points still pending: the budgets of the kinds that have Credits |
 
 ## Roles
 
-- **Writer**: a hot key that calls `setCredits`.
-- **Owner**: a cold key or a Safe. It configures and closes rounds, upgrades the contract (UUPS),
-  and replaces the writer with `setWriter`. `setWriter(address(0))` pauses all writes. Ownership
+- **Writer**: a hot key that calls `setCredits` and `increaseCredits`.
+- **Owner**: a cold key or a Safe. It configures and closes rounds, sweeps the surplus, and
+  replaces the writer with `updateWriter`. The payout token, the rate and the linked contracts
+  cannot be changed. `updateWriter(address(0))` pauses all writes. Ownership
   moves require two steps (`transferOwnership`, then `acceptOwnership`), and cannot be renounced.
 
 ## Build and test
@@ -84,12 +96,10 @@ forge coverage --no-match-coverage "dependencies|test"
 ## Deploy
 
 ```sh
-OWNER=0x... WRITER=0x... forge script script/Deploy.s.sol --rpc-url robinhood_testnet \
+NUMERAIRE=0x... OWNER=0x... WRITER=0x... URI=... UNITS_PER_POINT=... \
+  forge script script/Deploy2.s.sol --rpc-url robinhood_testnet \
   --broadcast --private-key $DEPLOYER_KEY --verify --verifier sourcify
 ```
 
-## Deployments
-
-| Network | Chain id | Proxy | Implementation |
-|---|---|---|---|
-| Robinhood Chain testnet | 46630 | `0x52cEca0a4d5Ac51c09dF3B46B55aF7d8F25241d1` | `0x91A549F50A03B352ff7b922bd34AbE3b78926dE3` |
+`UNITS_PER_POINT` is the numeraire's base units paid per whole Point (Points have 18 decimals).
+The deployer need not be the owner.

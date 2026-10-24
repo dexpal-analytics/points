@@ -1,0 +1,28 @@
+# Written by bin/points-client-sync from services/points in the DexPal GA. Do not edit here.
+
+[package]
+name = "dexpal-points"
+description = "DexPal's backend client for the points suite: writer and read calls only."
+version = "0.11.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+alloy = { version = "=2.5.0", default-features = false, features = ["std", "contract", "provider-http", "signer-local", "reqwest-rustls-tls"] }
+thiserror = "=2.0.18"
+tokio = { version = "=1.52.3", features = ["time"] }
+
+[dev-dependencies]
+serde_json = "1.0"
+tokio = { version = "=1.52.3", features = ["macros", "rt"] }
+
+[lints.clippy]
+too_many_lines = "deny"
+too_many_arguments = "deny"
+excessive_nesting = "deny"
+# diesel's QueryableByName derive writes `field: field`; the lint cannot be met in generated code.
+redundant_field_names = "allow"
+
+# Its own workspace: inside the DexPal GA tree, cargo would otherwise look for the root one.
+[workspace]

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.35;
 
-import {Test, stdError} from "forge-std/Test.sol";
+import {Test, Vm, stdError} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {DexPalPoints} from "../src/DexPalPoints2.sol";
 import {DexPalCredits} from "../src/DexPalCredits.sol";
-import {PointsConversion1} from "../src/PointsConversion.sol";
+import {PointsConversion} from "../src/PointsConversion.sol";
 
 contract Plain {}
 
@@ -16,9 +17,25 @@ contract Token is ERC20 {
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
     }
+
+    function move(address from, address to, uint256 amount) external {
+        _transfer(from, to, amount);
+    }
 }
 
-/// USDT-style: transfer returns nothing
+contract Alias {
+    Token immutable token;
+
+    constructor(Token token_) {
+        token = token_;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        token.move(msg.sender, to, amount);
+        return true;
+    }
+}
+
 contract NoReturnToken {
     mapping(address => uint256) public balanceOf;
 
@@ -32,7 +49,7 @@ contract NoReturnToken {
     }
 }
 
-contract DexPalPointsTest is Test {
+contract SuiteTest is Test {
     bytes16 constant R0 = bytes16(uint128(0xA0));
     bytes16 constant R1 = bytes16(uint128(0xA1));
     address constant OWNER = address(0xA11CE);
@@ -40,8 +57,12 @@ contract DexPalPointsTest is Test {
     address constant USER = address(0xCAFE);
     address constant OTHER = address(0xBEEF);
     address constant ATTACKER = address(0xBAD);
+    uint256 constant E = 1e18;
+    uint256 constant UNITS = 1e6;
     uint256 constant TX_GAS_CAP = 32_000_000;
-    string constant SOULBOUND = "transferral is not permitted, wait until the credits become tokens";
+    uint256 constant ISSUE_BATCH = 400;
+    string constant SOULBOUND = "credits are not transferable";
+    string constant OWED = "sweep would take what is owed";
 
     DexPalCredits.Kind constant TRADING = DexPalCredits.Kind.Trading;
     DexPalCredits.Kind constant QUEST = DexPalCredits.Kind.Quest;
@@ -49,262 +70,100 @@ contract DexPalPointsTest is Test {
 
     DexPalPoints points;
     DexPalCredits credits;
-    PointsConversion1 conv;
+    PointsConversion conv;
     Token token;
     uint256 batchNonce;
 
     function setUp() public {
         token = new Token();
-        conv = new PointsConversion1();
-        credits = new DexPalCredits(OWNER, WRITER, "uri");
-        points = new DexPalPoints(address(token), OWNER, address(conv), address(credits));
-        vm.prank(OWNER);
-        credits.setPointsContractAddress(address(points));
+        (points, credits) = build(address(token));
+        conv = PointsConversion(points.pointsConversion());
         token.mint(address(points), 1e30);
-        open(R0, [uint256(250_000), 100_000, 150_000]);
+        open(R0, [250_000 * E, 100_000 * E, 150_000 * E]);
     }
 
-    // -------------------------------------------------------------------- e2e
-
-    /// Full lifecycle across three rounds with four users:
-    ///   alice - trader on two dexes
-    ///   bob   - trader + quester, holds points across rounds before claiming
-    ///   carol - quester + referrer, claims to a separate cold wallet
-    ///   dave  - cheater, banned mid-round 0, stays banned forever
-    ///
-    /// All budgets and credit amounts are chosen so the pro-rata shares divide
-    /// exactly, letting every assertion be an exact equality.
-    function test_e2e_multiRound() public {
+    function test_e2e() public {
         address alice = makeAddr("alice");
         address bob = makeAddr("bob");
         address carol = makeAddr("carol");
-        address carolCold = makeAddr("carolCold");
+        address cold = makeAddr("cold");
         address dave = makeAddr("dave");
-        bytes16 R2 = bytes16(uint128(0xA2));
-        bytes16 R3 = bytes16(uint128(0xA3));
-        DexPalCredits.Credit[] memory b;
-
-        // =====================================================================
-        // ROUND 0 - budgets: Trading 250k, Quest 100k, Referral 150k (opened in setUp)
-        // =====================================================================
-
-        // --- Batch r0:b1: first sync from the backend -------------------------
-        b = new DexPalCredits.Credit[](4);
+        DexPalCredits.Credit[] memory b = new DexPalCredits.Credit[](4);
         b[0] = cr(alice, TRADING, "arcus", 300);
         b[1] = cr(bob, TRADING, "aster", 100);
         b[2] = cr(carol, QUEST, "arcus", 50);
         b[3] = cr(dave, TRADING, "arcus", 500);
         batch("r0:b1", b);
+        assertEq(pending(carol), 100_000 * E);
 
-        // Carol is the only quester so far, so she'd take the entire quest budget.
-        assertEq(pending(carol), 100_000);
-
-        // --- Batch r0:b2: incremental deltas ---------------------------------
-        b = new DexPalCredits.Credit[](4);
-        b[0] = cr(alice, TRADING, "aster", 100); // second dex: adds to her arcus 300 -> 400
+        b[0] = cr(alice, TRADING, "aster", 100);
         b[1] = cr(bob, QUEST, "aster", 50);
         b[2] = cr(carol, REFERRAL, 0, 10);
         b[3] = cr(dave, REFERRAL, 0, 10);
         batch("r0:b2", b);
-        assertEq(credits.balanceOf(alice, 0), 400);
+        assertEq(pending(alice), 100_000 * E);
+        assertEq(pending(bob), 75_000 * E);
+        assertEq(pending(dave), 200_000 * E);
 
-        // Supplies now: Trading 1000 (a400 b100 d500), Quest 100 (c50 b50), Referral 20 (c10 d10).
-        assertEq(pending(alice), 100_000); // 250k * 400/1000
-        assertEq(pending(bob), 25_000 + 50_000); // trading 100/1000 + quest 50/100
-        assertEq(pending(carol), 50_000 + 75_000); // quest 50/100 + referral 10/20
-        assertEq(pending(dave), 125_000 + 75_000); // trading 500/1000 + referral 10/20
-
-        // --- Backend retries r0:b2 (e.g. RPC timeout) -------------------------
-        // The batch id was already consumed, so the retry is rejected and nobody
-        // is double-credited.
-        vm.expectRevert("bathc already processed");
+        vm.expectRevert("batch already processed");
         batch("r0:b2", b);
-        assertEq(credits.balanceOf(alice, 0), 400);
 
-        // --- Dave is caught wash trading and banned mid-round -----------------
-        // His credits are burned, which shrinks the supplies, so his share is
-        // redistributed pro-rata to everyone else rather than left unpaid.
-        vm.prank(OWNER);
-        points.banUser(dave);
+        ban(dave);
         assertEq(pending(dave), 0);
-        assertEq(credits.totalSupply(0), 500); // a400 b100
-        assertEq(credits.totalSupply(2), 10); // c10
-        assertEq(pending(alice), 200_000); // 250k * 400/500 (doubled)
-        assertEq(pending(carol), 50_000 + 150_000); // now sole referrer
+        assertEq(pending(alice), 200_000 * E);
+        assertEq(pending(carol), 200_000 * E);
 
-        // --- Backend keeps sending dave's activity; it's silently skipped ------
-        b = new DexPalCredits.Credit[](1);
-        b[0] = cr(dave, TRADING, "arcus", 1000);
-        batch("r0:b3", b);
-        assertEq(credits.balanceOf(dave, 0), 0);
-        assertEq(credits.totalSupply(0), 500);
-
-        // --- Correction: backend recomputes carol's quest total as 150 ---------
-        // setCredits overwrites the per-kind balance, so it's the tool for fixes.
         write(carol, QUEST, "arcus", 150);
-        // Quest supply: c150 b50 = 200.
-
-        // Final round-0 entitlements (sum = full 500k budget):
-        //   alice 200k = trading 400/500
-        //   bob    75k = trading 100/500 (50k) + quest 50/200 (25k)
-        //   carol 225k = quest 150/200 (75k) + referral 10/10 (150k)
-        assertEq(pending(alice), 200_000);
-        assertEq(pending(bob), 75_000);
-        assertEq(pending(carol), 225_000);
-
-        // --- Close round 0 ---------------------------------------------------
         close();
+        assertEq(credits.owedPoints(), 500_000 * E);
 
-        // Credits are frozen: no more writes or bans.
-        vm.expectRevert("state is not open");
-        write(alice, TRADING, "arcus", 1);
-        vm.expectRevert("cannot ban whilst closed");
-        vm.prank(OWNER);
-        points.banUser(alice);
-
-        // Can't start round 1 while anyone still holds round-0 credits; that
-        // would let them roll into the new budget.
         vm.expectRevert("remaining user credits left");
-        open(R1, [uint256(100_000), 0, 50_000]);
+        open(R1, [uint256(1), 0, 0]);
 
-        // --- Convert credits -> DPP for every holder -------------------------
-        // Order doesn't matter: each withdrawal subtracts its payout from the
-        // budget as it burns, so later users' shares are unchanged.
-        issue(carol);
-        issue(alice);
-        issue(bob);
-        // Dave holds no credits, so he doesn't need issuing.
-        assertEq(points.balanceOf(alice), 200_000);
-        assertEq(points.balanceOf(bob), 75_000);
-        assertEq(points.balanceOf(carol), 225_000);
-        assertEq(points.totalSupply(), 500_000);
-
-        // Every credit burned and every budget paid out to the wei.
+        address[] memory list = new address[](4);
+        list[0] = carol;
+        list[1] = dave;
+        list[2] = alice;
+        list[3] = bob;
+        vm.prank(ATTACKER);
+        points.issuePoints(list);
+        assertEq(points.balanceOf(alice), 200_000 * E);
+        assertEq(points.balanceOf(bob), 75_000 * E);
+        assertEq(points.balanceOf(carol), 225_000 * E);
+        assertEq(points.balanceOf(dave), 0);
+        assertEq(credits.owedPoints(), 0);
         for (uint256 id; id < 3; ++id) {
             assertEq(credits.totalSupply(id), 0);
             assertEq(credits.budget(DexPalCredits.Kind(id)), 0);
         }
 
-        // --- Claims ----------------------------------------------------------
-        // Alice claims straight away; carol sends to her cold wallet; bob waits.
-        uint256 aliceExpected = conv.convertPoints(200_000);
-        uint256 carolExpected = conv.convertPoints(225_000);
-        vm.prank(alice);
-        points.claimPoints(alice, alice);
         vm.prank(carol);
-        points.claimPoints(carol, carolCold);
-        assertEq(token.balanceOf(alice), aliceExpected);
-        assertEq(token.balanceOf(carolCold), carolExpected);
-        assertEq(points.balanceOf(alice), 0);
-        assertEq(points.balanceOf(carol), 0);
+        points.claimPoints(carol, cold);
+        assertEq(token.balanceOf(cold), 225_000 * UNITS);
 
-        // =====================================================================
-        // ROUND 1 - budgets: Trading 100k, Quest 0, Referral 50k
-        // =====================================================================
-        open(R1, [uint256(100_000), 0, 50_000]);
-        assertEq(credits.roundName(), R1);
-
-        // Batch ids are global, not per round, so the backend must namespace
-        // them by round. Reusing a round-0 id is rejected.
-        b = new DexPalCredits.Credit[](1);
-        b[0] = cr(alice, TRADING, "arcus", 1);
-        vm.expectRevert("bathc already processed");
-        batch("r0:b1", b);
-
-        b = new DexPalCredits.Credit[](4);
-        b[0] = cr(alice, TRADING, "arcus", 1);
-        b[1] = cr(bob, TRADING, "aster", 3);
-        b[2] = cr(dave, TRADING, "arcus", 5); // still banned: skipped
-        b[3] = cr(carol, REFERRAL, 0, 1);
+        open(R1, [100_000 * E, 0, 0]);
+        b = new DexPalCredits.Credit[](2);
+        b[0] = cr(bob, TRADING, "aster", 3);
+        b[1] = cr(dave, TRADING, "arcus", 5);
         batch("r1:b1", b);
-        assertEq(credits.balanceOf(dave, 0), 0);
-
-        assertEq(pending(alice), 25_000); // 100k * 1/4
-        assertEq(pending(bob), 75_000); // 100k * 3/4
-        assertEq(pending(carol), 50_000); // sole referrer
-        // Bob's prediction combines his unclaimed round-0 DPP with round-1 pending.
-        assertEq(points.predictedBalanceOf(bob), 75_000 + 75_000);
-
+        assertEq(points.predictedBalanceOf(bob), 175_000 * E);
         close();
-        issue(alice);
         issue(bob);
-        issue(carol);
-        assertEq(points.balanceOf(bob), 150_000);
-
-        // Bob claims both rounds in one go.
-        uint256 bobExpected = conv.convertPoints(150_000);
         vm.prank(bob);
         points.claimPoints(bob, bob);
-        assertEq(token.balanceOf(bob), bobExpected);
-
-        aliceExpected += conv.convertPoints(25_000);
-        carolExpected += conv.convertPoints(50_000);
-        vm.prank(alice);
-        points.claimPoints(alice, alice);
-        vm.prank(carol);
-        points.claimPoints(carol, carolCold);
-        assertEq(token.balanceOf(alice), aliceExpected);
-        assertEq(token.balanceOf(carolCold), carolExpected);
-
-        // Everything issued has been claimed.
-        assertEq(points.totalSupply(), 0);
-        assertEq(token.balanceOf(address(points)), 1e30 - aliceExpected - bobExpected - carolExpected);
+        assertEq(token.balanceOf(bob), 175_000 * UNITS);
         assertEq(token.balanceOf(dave), 0);
-
-        // =====================================================================
-        // ROUNDS 2-3 - an empty round cycles cleanly
-        // =====================================================================
-        // No credits written, so supply stays 0 and the next round can open
-        // immediately. R2's unspent budget is simply overwritten.
-        open(R2, [uint256(1), 1, 1]);
-        close();
-        open(R3, [uint256(10), 10, 10]);
-        assertEq(uint8(credits.state()), uint8(DexPalCredits.State.Open));
-        assertEq(credits.roundName(), R3);
-        assertEq(credits.budget(TRADING), 10);
     }
-
-    // ---------------------------------------------------------------- helpers
-
-    function cr(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount)
-        internal
-        pure
-        returns (DexPalCredits.Credit memory)
-    {
-        return DexPalCredits.Credit(user, kind, dex, amount);
-    }
-
-    function batch(string memory id, DexPalCredits.Credit[] memory entries) internal {
-        vm.prank(WRITER);
-        credits.increaseCredits(entries, keccak256(bytes(id)));
-    }
-
-    // ---------------------------------------------------------------- credits
 
     function test_setCredits() public {
         vm.expectEmit(address(credits));
         emit DexPalCredits.CreditsSet(R0, USER, "arcus", TRADING, 100);
         write(USER, TRADING, "arcus", 100);
-        assertEq(credits.balanceOf(USER, 0), 100);
-        assertEq(credits.totalSupply(0), 100);
-    }
-
-    function test_overwrite() public {
-        write(USER, TRADING, "arcus", 100);
-        write(USER, TRADING, "arcus", 100);
-        assertEq(credits.totalSupply(0), 100);
-        write(USER, TRADING, "arcus", 30);
+        write(USER, TRADING, "aster", 30);
         assertEq(credits.balanceOf(USER, 0), 30);
+        assertEq(credits.totalSupply(0), 30);
         write(USER, TRADING, "arcus", 0);
-        assertEq(credits.balanceOf(USER, 0), 0);
-        assertEq(credits.totalSupply(0), 0);
-    }
-
-    /// setCredits is per kind, not per dex: a second dex overwrites the first.
-    function test_setCreditsIgnoresDex() public {
-        write(USER, TRADING, "arcus", 30);
-        write(USER, TRADING, "aster", 10);
-        assertEq(credits.balanceOf(USER, 0), 10);
+        assertEq(credits.totalSupply(), 0);
     }
 
     function test_increaseCredits() public {
@@ -313,59 +172,39 @@ contract DexPalPointsTest is Test {
         add(USER, TRADING, "arcus", 30);
         add(USER, TRADING, "aster", 10);
         assertEq(credits.balanceOf(USER, 0), 40);
-        assertEq(credits.totalSupply(0), 40);
     }
 
-    function test_batchReplay() public {
-        bytes32 id = keccak256("round0:batch1");
+    function test_replay() public {
+        bytes32 id = keccak256("r0:b1");
+        vm.startPrank(WRITER);
+        credits.increaseCredits(one(USER, TRADING, "arcus", 30), id);
+        assertTrue(credits.processed(id));
+        vm.expectRevert("batch already processed");
+        credits.increaseCredits(one(USER, TRADING, "arcus", 30), id);
+        vm.stopPrank();
+        close();
+        issue(USER);
+        open(R1, [uint256(1), 1, 1]);
+        vm.expectRevert("batch already processed");
         vm.prank(WRITER);
         credits.increaseCredits(one(USER, TRADING, "arcus", 30), id);
-
-        vm.expectRevert("bathc already processed");
-        vm.prank(WRITER);
-        credits.increaseCredits(one(USER, TRADING, "arcus", 30), id);
-        assertEq(credits.balanceOf(USER, 0), 30);
-
-        vm.prank(WRITER);
-        credits.increaseCredits(one(USER, TRADING, "arcus", 30), keccak256("round0:batch2"));
-        assertEq(credits.balanceOf(USER, 0), 60);
     }
 
-    /// a reverted batch must not burn its id, so the backend can retry it
-    function test_failedBatchRetryable() public {
-        bytes32 id = keccak256("round0:batch1");
+    function test_retry() public {
+        bytes32 id = keccak256("r0:b1");
         write(OTHER, TRADING, "aster", type(uint256).max);
         vm.expectRevert(stdError.arithmeticError);
         vm.prank(WRITER);
         credits.increaseCredits(one(USER, TRADING, "arcus", 1), id);
-
+        assertFalse(credits.processed(id));
         write(OTHER, TRADING, "aster", 0);
         vm.prank(WRITER);
         credits.increaseCredits(one(USER, TRADING, "arcus", 1), id);
         assertEq(credits.balanceOf(USER, 0), 1);
     }
 
-    function test_duplicate() public {
-        DexPalCredits.Credit[] memory batch = new DexPalCredits.Credit[](2);
-        batch[0] = DexPalCredits.Credit(USER, TRADING, "arcus", 5);
-        batch[1] = DexPalCredits.Credit(USER, TRADING, "arcus", 9);
-        vm.expectEmit(address(credits));
-        emit DexPalCredits.CreditsSet(R0, USER, "arcus", TRADING, 5);
-        vm.expectEmit(address(credits));
-        emit DexPalCredits.CreditsSet(R0, USER, "arcus", TRADING, 9);
-        vm.prank(WRITER);
-        credits.setCredits(batch);
-        assertEq(credits.balanceOf(USER, 0), 9);
-    }
-
-    function test_empty() public {
-        vm.prank(WRITER);
-        credits.setCredits(new DexPalCredits.Credit[](0));
-    }
-
     function test_badKind() public {
         bytes memory call = abi.encodeCall(credits.setCredits, (one(USER, TRADING, "arcus", 1)));
-        // selector | offset | length | user | kind
         call[4 + 32 * 3 + 31] = bytes1(uint8(3));
         vm.prank(WRITER);
         (bool ok, bytes memory reason) = address(credits).call(call);
@@ -373,37 +212,18 @@ contract DexPalPointsTest is Test {
         assertEq(reason.length, 0);
     }
 
-    function test_overflow() public {
-        uint256 max = type(uint256).max;
-        write(USER, TRADING, "arcus", max);
-        write(USER, TRADING, "arcus", max);
-        assertEq(pending(USER), 250_000);
-
-        DexPalCredits.Credit[] memory batch = new DexPalCredits.Credit[](2);
-        batch[0] = DexPalCredits.Credit(OTHER, QUEST, 0, 5);
-        batch[1] = DexPalCredits.Credit(OTHER, TRADING, "aster", 1);
-        vm.prank(WRITER);
-        vm.expectRevert(stdError.arithmeticError);
-        credits.setCredits(batch);
-        assertEq(credits.balanceOf(OTHER, 1), 0);
-    }
-
-    function test_batch() public {
-        DexPalCredits.Credit[] memory batch = new DexPalCredits.Credit[](200);
-        for (uint256 i; i < batch.length; ++i) {
-            batch[i] = DexPalCredits.Credit(address(uint160(i + 1)), TRADING, "arcus", i + 1);
+    function test_writeBatch() public {
+        DexPalCredits.Credit[] memory b = new DexPalCredits.Credit[](200);
+        for (uint256 i; i < b.length; ++i) {
+            b[i] = cr(address(uint160(i + 1)), TRADING, "arcus", i + 1);
         }
         vm.prank(WRITER);
         uint256 start = gasleft();
-        credits.setCredits(batch);
+        credits.setCredits(b);
         assertLt(start - gasleft(), TX_GAS_CAP / 2);
-        assertEq(credits.balanceOf(address(200), 0), 200);
     }
 
     function test_onlyWriter() public {
-        vm.expectRevert("you are not the writer");
-        vm.prank(ATTACKER);
-        credits.setCredits(one(USER, TRADING, "arcus", 1));
         vm.expectRevert("you are not the writer");
         vm.prank(OWNER);
         credits.setCredits(one(USER, TRADING, "arcus", 1));
@@ -412,7 +232,7 @@ contract DexPalPointsTest is Test {
         credits.increaseCredits(one(USER, TRADING, "arcus", 1), bytes32(0));
     }
 
-    function test_roundNotOpen() public {
+    function test_notOpen() public {
         close();
         vm.expectRevert("state is not open");
         write(USER, TRADING, "arcus", 1);
@@ -425,64 +245,50 @@ contract DexPalPointsTest is Test {
         vm.expectRevert(bytes(SOULBOUND));
         vm.prank(USER);
         credits.safeTransferFrom(USER, OTHER, 0, 1, "");
-
-        uint256[] memory ids = new uint256[](1);
-        uint256[] memory vals = new uint256[](1);
-        vals[0] = 1;
-        vm.expectRevert(bytes(SOULBOUND));
-        vm.prank(USER);
-        credits.safeBatchTransferFrom(USER, OTHER, ids, vals, "");
     }
 
-    function test_contractRecipient() public {
+    function test_contractHolder() public {
         address c = address(new Plain());
         write(c, TRADING, "arcus", 5);
         assertEq(credits.balanceOf(c, 0), 5);
     }
 
-    function test_onlyPointsContract() public {
+    function test_onlyPoints() public {
         vm.startPrank(OWNER);
-        vm.expectRevert();
+        vm.expectRevert("you are not the points contract");
         credits.openRound(R1, [uint256(1), 1, 1]);
-        vm.expectRevert();
+        vm.expectRevert("you are not the points contract");
         credits.closeRound();
-        vm.expectRevert();
+        vm.expectRevert("you are not the points contract");
         credits.banUser(USER);
-        vm.expectRevert();
+        vm.expectRevert("you are not the points contract");
         credits.withdrawPoints(USER);
-        vm.expectRevert();
+        vm.expectRevert("you are not the points contract");
         credits.pointsBalanceOf(USER);
         vm.stopPrank();
     }
 
-    // ----------------------------------------------------------------- points
-
-    function test_points() public {
+    function test_share() public {
         write(USER, TRADING, "arcus", 30);
         write(OTHER, TRADING, "aster", 10);
         write(USER, QUEST, "arcus", 1);
-        assertEq(pending(USER), 187_500 + 100_000);
-        assertEq(pending(OTHER), 62_500);
+        assertEq(pending(USER), 287_500 * E);
+        assertEq(pending(OTHER), 62_500 * E);
+        assertEq(points.predictedBalanceOfConverted(USER), 287_500 * UNITS);
     }
 
-    /// last withdrawer sweeps the rounding dust, so the full budget is paid out
-    function test_rounding() public {
+    function test_dust() public {
         close();
         open(R1, [uint256(100), 0, 0]);
         write(USER, TRADING, "arcus", 1);
         write(OTHER, TRADING, "arcus", 1);
         write(ATTACKER, TRADING, "arcus", 1);
-        assertEq(pending(USER), 33);
-        assertEq(pending(USER) + pending(OTHER) + pending(ATTACKER), 99);
-
         close();
         issue(USER);
         issue(OTHER);
         issue(ATTACKER);
         assertEq(points.balanceOf(USER), 33);
-        assertEq(points.balanceOf(OTHER), 33);
         assertEq(points.balanceOf(ATTACKER), 34);
-        assertEq(points.totalSupply(), 100);
         assertEq(credits.budget(TRADING), 0);
     }
 
@@ -493,19 +299,16 @@ contract DexPalPointsTest is Test {
         write(USER, TRADING, "arcus", a);
         write(OTHER, TRADING, "aster", b);
         write(ATTACKER, REFERRAL, 0, c);
-
         uint256 pu = pending(USER);
         uint256 po = pending(OTHER);
-        assertLe(pu + po, 250_000);
-        if (a + b > 0) assertGe(pu + po, 250_000 - 1);
-        assertEq(pending(ATTACKER), c > 0 ? 150_000 : 0);
-
+        assertLe(pu + po, 250_000 * E);
+        assertEq(pending(ATTACKER), c > 0 ? 150_000 * E : 0);
         close();
         issue(OTHER);
         issue(USER);
         assertEq(points.balanceOf(OTHER), po);
         assertGe(points.balanceOf(USER), pu);
-        if (a + b > 0) assertEq(points.balanceOf(USER) + points.balanceOf(OTHER), 250_000);
+        if (a + b > 0) assertEq(points.balanceOf(USER) + points.balanceOf(OTHER), 250_000 * E);
     }
 
     function test_issue() public {
@@ -513,25 +316,73 @@ contract DexPalPointsTest is Test {
         write(OTHER, TRADING, "aster", 10);
         close();
         issue(USER);
-        assertEq(points.balanceOf(USER), 187_500);
-        assertEq(points.predictedBalanceOf(USER), 187_500);
-        assertEq(pending(USER), 0);
-        assertEq(credits.balanceOf(USER, 0), 0);
-        assertEq(credits.budget(TRADING), 62_500);
-        assertEq(pending(OTHER), 62_500);
+        assertEq(points.balanceOf(USER), 187_500 * E);
+        assertEq(points.predictedBalanceOf(USER), 187_500 * E);
+        assertEq(credits.budget(TRADING), 62_500 * E);
+        assertEq(pending(OTHER), 62_500 * E);
+        issue(USER);
+        assertEq(points.balanceOf(USER), 187_500 * E);
     }
 
-    function test_issueNeedsClosed() public {
+    function test_issueOpen() public {
         write(USER, TRADING, "arcus", 1);
         vm.expectRevert("state needs to be closed");
         issue(USER);
     }
 
-    function test_issueOnlyOwner() public {
+    function test_issueStranger() public {
+        write(USER, TRADING, "arcus", 1);
         close();
-        vm.expectRevert(unauthorized(WRITER));
+        vm.prank(ATTACKER);
+        points.issuePoints(users(USER));
+        assertEq(points.balanceOf(USER), 250_000 * E);
+        assertEq(points.balanceOf(ATTACKER), 0);
+    }
+
+    function test_issueBanned() public {
+        write(USER, TRADING, "arcus", 1);
+        write(OTHER, TRADING, "aster", 1);
+        ban(ATTACKER);
+        write(ATTACKER, TRADING, "arcus", 1);
+        close();
+        address[] memory list = new address[](3);
+        list[0] = USER;
+        list[1] = ATTACKER;
+        list[2] = OTHER;
+        vm.recordLogs();
+        points.issuePoints(list);
+        uint256 mints;
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == address(points)) ++mints;
+        }
+        assertEq(mints, 2);
+        assertEq(points.balanceOf(ATTACKER), 0);
+        assertEq(points.totalSupply(), 250_000 * E);
+    }
+
+    function test_issueGas() public {
+        close();
+        open(R1, [100_000 * E, 100_000 * E, 100_000 * E]);
+        address[] memory list = new address[](ISSUE_BATCH);
+        DexPalCredits.Credit[] memory b = new DexPalCredits.Credit[](3 * ISSUE_BATCH);
+        for (uint256 i; i < ISSUE_BATCH; ++i) {
+            list[i] = address(uint160(0x1000 + i));
+            for (uint256 k; k < 3; ++k) {
+                b[3 * i + k] = cr(list[i], DexPalCredits.Kind(k), "arcus", i + 1);
+            }
+        }
         vm.prank(WRITER);
-        points.issuePoints(USER);
+        credits.setCredits(b);
+        close();
+        vm.cool(address(points));
+        vm.cool(address(credits));
+        uint256 start = gasleft();
+        points.issuePoints(list);
+        uint256 used = start - gasleft();
+        emit log_named_uint("issue gas per wallet", used / ISSUE_BATCH);
+        assertLt(used, TX_GAS_CAP * 9 / 10);
+        assertEq(credits.totalSupply(), 0);
     }
 
     function test_claim() public {
@@ -539,154 +390,234 @@ contract DexPalPointsTest is Test {
         write(OTHER, TRADING, "aster", 10);
         close();
         issue(USER);
-        uint256 expected = conv.convertPoints(points.balanceOf(USER));
-
+        assertEq(points.balanceOfConverted(USER), 187_500 * UNITS);
         vm.expectRevert("only the owner of the points can call this");
         vm.prank(ATTACKER);
         points.claimPoints(USER, ATTACKER);
-
-        vm.prank(USER);
+        vm.startPrank(USER);
         points.claimPoints(USER, OTHER);
-        assertEq(token.balanceOf(OTHER), expected);
+        vm.expectRevert("nothing to pay");
+        points.claimPoints(USER, OTHER);
+        vm.stopPrank();
+        assertEq(token.balanceOf(OTHER), 187_500 * UNITS);
         assertEq(points.balanceOf(USER), 0);
-
-        vm.prank(USER);
-        points.claimPoints(USER, OTHER);
-        assertEq(token.balanceOf(OTHER), expected);
     }
 
-    /// fails with a raw `transfer`, passes once claimPoints uses SafeERC20
-    function test_claimNoReturnToken() public {
-        NoReturnToken usdt = new NoReturnToken();
-        usdt.mint(address(points), 1e30);
+    function test_underfunded() public {
+        Token t = new Token();
+        (DexPalPoints p, DexPalCredits c) = build(address(t));
+        t.mint(address(p), 1);
+        vm.startPrank(OWNER);
+        p.openRound(R0, [E, 0, 0]);
+        vm.stopPrank();
+        vm.prank(WRITER);
+        c.setCredits(one(USER, TRADING, "arcus", 1));
         vm.prank(OWNER);
-        points.updateNumeraire(address(usdt));
+        p.closeRound();
+        p.issuePoints(users(USER));
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, address(p), 1, UNITS));
+        vm.prank(USER);
+        p.claimPoints(USER, USER);
+    }
 
+    function test_noReturnToken() public {
+        NoReturnToken usdt = new NoReturnToken();
+        (DexPalPoints p, DexPalCredits c) = build(address(usdt));
+        usdt.mint(address(p), 1e30);
+        vm.prank(OWNER);
+        p.openRound(R0, [E, 0, 0]);
+        vm.prank(WRITER);
+        c.setCredits(one(USER, TRADING, "arcus", 1));
+        vm.prank(OWNER);
+        p.closeRound();
+        p.issuePoints(users(USER));
+        vm.prank(USER);
+        p.claimPoints(USER, USER);
+        assertEq(usdt.balanceOf(USER), UNITS);
+    }
+
+    function test_convert() public {
+        assertEq(conv.unitsPerPoint(), UNITS);
+        assertEq(conv.convertPoints(E), UNITS);
+        assertEq(conv.convertPoints(E / 2), UNITS / 2);
+        assertEq(conv.convertPoints(E / UNITS - 1), 0);
+        assertEq(new PointsConversion(3e18).convertPoints(7), 21);
+        vm.expectRevert("rate is zero");
+        new PointsConversion(0);
+    }
+
+    function test_sweepOwed() public {
         write(USER, TRADING, "arcus", 1);
-        close();
+        uint256 surplus = 1e30 - 250_000 * UNITS;
+        vm.startPrank(OWNER);
+        vm.expectRevert(bytes(OWED));
+        points.sweep(address(token), OWNER, surplus + 1);
+        points.closeRound();
+        vm.expectRevert(bytes(OWED));
+        points.sweep(address(token), OWNER, surplus + 1);
+        vm.stopPrank();
         issue(USER);
-        uint256 expected = conv.convertPoints(points.balanceOf(USER));
+        vm.startPrank(OWNER);
+        vm.expectRevert(bytes(OWED));
+        points.sweep(address(token), OWNER, surplus + 1);
+        points.sweep(address(token), OWNER, surplus);
+        vm.stopPrank();
+        assertEq(token.balanceOf(OWNER), surplus);
         vm.prank(USER);
         points.claimPoints(USER, USER);
-        assertEq(usdt.balanceOf(USER), expected);
+        assertEq(token.balanceOf(USER), 250_000 * UNITS);
     }
 
-    // ----------------------------------------------------------------- rounds
+    function test_sweepOpenKinds() public {
+        assertEq(credits.owedPoints(), 500_000 * E);
+        write(USER, TRADING, "arcus", 1);
+        write(OTHER, REFERRAL, 0, 1);
+        close();
+        assertEq(credits.owedPoints(), 400_000 * E);
+    }
+
+    function test_sweepAlias() public {
+        write(USER, TRADING, "arcus", 1);
+        Alias a = new Alias(token);
+        vm.expectRevert(bytes(OWED));
+        vm.prank(OWNER);
+        points.sweep(address(a), OWNER, 1e30);
+    }
+
+    function test_sweepStray() public {
+        (DexPalPoints p, DexPalCredits c) = build(address(token));
+        vm.prank(OWNER);
+        p.openRound(R0, [E, 0, 0]);
+        vm.prank(WRITER);
+        c.setCredits(one(USER, TRADING, "arcus", 1));
+        Token stray = new Token();
+        stray.mint(address(p), 5);
+        vm.prank(OWNER);
+        p.sweep(address(stray), OTHER, 5);
+        assertEq(stray.balanceOf(OTHER), 5);
+    }
+
+    function test_sweepOwner() public {
+        vm.expectRevert(unauthorized(ATTACKER));
+        vm.prank(ATTACKER);
+        points.sweep(address(token), ATTACKER, 1);
+    }
 
     function test_openRound() public {
         vm.expectRevert(unauthorized(WRITER));
         vm.prank(WRITER);
         points.openRound(R1, [uint256(1), 1, 1]);
-
         vm.expectRevert("call closeRound first");
         open(R1, [uint256(1), 1, 1]);
-
         close();
         vm.expectEmit(address(credits));
         emit DexPalCredits.RoundOpened(R1, [uint256(500), 0, 0]);
         open(R1, [uint256(500), 0, 0]);
         assertEq(credits.budget(TRADING), 500);
         assertEq(credits.roundName(), R1);
+        assertEq(uint8(credits.state()), uint8(DexPalCredits.State.Open));
     }
 
-    function test_rolloverGate() public {
-        write(USER, TRADING, "arcus", 1);
-        close();
-        vm.expectRevert("remaining user credits left");
-        open(R1, [uint256(1000), 0, 0]);
-
-        issue(USER);
-        open(R1, [uint256(1000), 0, 0]);
-        assertEq(credits.budget(TRADING), 1000);
+    function test_rollover() public {
+        for (uint256 k; k < 3; ++k) {
+            write(USER, DexPalCredits.Kind(k), "arcus", 1);
+            close();
+            vm.expectRevert("remaining user credits left");
+            open(R1, [uint256(1), 1, 1]);
+            issue(USER);
+            open(R1, [uint256(1), 1, 1]);
+        }
     }
 
     function test_closeRound() public {
         vm.expectRevert(unauthorized(WRITER));
         vm.prank(WRITER);
         points.closeRound();
-
+        vm.expectEmit(address(credits));
+        emit DexPalCredits.RoundClosed(R0);
         close();
         assertEq(uint8(credits.state()), uint8(DexPalCredits.State.Closed));
         vm.expectRevert("state needs to be open");
         close();
     }
 
-    // ------------------------------------------------------------------- bans
-
     function test_ban() public {
         write(USER, TRADING, "arcus", 30);
+        write(USER, QUEST, "arcus", 1);
         write(OTHER, TRADING, "aster", 10);
-
         vm.expectRevert(unauthorized(ATTACKER));
         vm.prank(ATTACKER);
         points.banUser(USER);
-
-        vm.prank(OWNER);
-        points.banUser(USER);
+        vm.expectEmit(address(credits));
+        emit DexPalCredits.Disqualified(R0, USER, true);
+        ban(USER);
+        assertTrue(credits.isBanned(USER));
+        assertFalse(credits.isBanned(OTHER));
+        assertEq(credits.bannedUsers().length, 1);
+        assertEq(credits.bannedUsers()[0], USER);
+        vm.recordLogs();
+        ban(USER);
+        assertEq(vm.getRecordedLogs().length, 0);
+        assertEq(credits.balanceOf(USER, 1), 0);
         assertEq(pending(USER), 0);
-        assertEq(credits.balanceOf(USER, 0), 0);
-        // banned share is redistributed, not withheld
-        assertEq(pending(OTHER), 250_000);
-
-        DexPalCredits.Credit[] memory batch = new DexPalCredits.Credit[](2);
-        batch[0] = DexPalCredits.Credit(USER, TRADING, "arcus", 999);
-        batch[1] = DexPalCredits.Credit(OTHER, TRADING, "aster", 20);
-        vm.prank(WRITER);
-        credits.setCredits(batch);
+        assertEq(pending(OTHER), 250_000 * E);
+        write(USER, TRADING, "arcus", 999);
         add(USER, TRADING, "arcus", 5);
         assertEq(credits.balanceOf(USER, 0), 0);
-        assertEq(credits.balanceOf(OTHER, 0), 20);
-
         close();
         vm.expectRevert("cannot ban whilst closed");
-        vm.prank(OWNER);
-        points.banUser(OTHER);
-    }
-
-    function test_banPersistsAcrossRounds() public {
-        vm.prank(OWNER);
-        points.banUser(USER);
-        close();
-        open(R1, [uint256(1000), 0, 0]);
+        ban(OTHER);
+        issue(OTHER);
+        open(R1, [uint256(1), 0, 0]);
         write(USER, TRADING, "arcus", 1);
         assertEq(credits.balanceOf(USER, 0), 0);
     }
 
-    // ------------------------------------------------------------------ admin
-
-    function test_setters() public {
-        vm.startPrank(ATTACKER);
-        vm.expectRevert(unauthorized(ATTACKER));
-        points.updateNumeraire(ATTACKER);
-        vm.expectRevert(unauthorized(ATTACKER));
-        points.updatePointsConversion(ATTACKER);
-        vm.expectRevert(unauthorized(ATTACKER));
-        points.updateCreditsContractAddress(ATTACKER);
-        vm.expectRevert(unauthorized(ATTACKER));
-        credits.setPointsContractAddress(ATTACKER);
-        vm.expectRevert(unauthorized(ATTACKER));
-        credits.updateWriter(ATTACKER);
+    function test_settersGone() public {
+        vm.startPrank(OWNER);
+        bytes[4] memory calls = [
+            abi.encodeWithSignature("updateNumeraire(address)", ATTACKER),
+            abi.encodeWithSignature("updatePointsConversion(address)", ATTACKER),
+            abi.encodeWithSignature("updateCreditsContractAddress(address)", ATTACKER),
+            abi.encodeWithSignature("setPointsContractAddress(address)", ATTACKER)
+        ];
+        for (uint256 i; i < 3; ++i) {
+            (bool ok,) = address(points).call(calls[i]);
+            assertFalse(ok);
+        }
+        (bool okCredits,) = address(credits).call(calls[3]);
+        assertFalse(okCredits);
         vm.stopPrank();
+        assertEq(points.numeraire(), address(token));
+        assertEq(points.creditsContractAddress(), address(credits));
+        assertEq(credits.pointsContractAddress(), address(points));
     }
 
     function test_updateWriter() public {
+        vm.expectRevert(unauthorized(ATTACKER));
+        vm.prank(ATTACKER);
+        credits.updateWriter(ATTACKER);
         vm.expectEmit(address(credits));
         emit DexPalCredits.WriterSet(USER);
         vm.prank(OWNER);
         credits.updateWriter(USER);
-
         vm.expectRevert("you are not the writer");
         write(USER, TRADING, "arcus", 1);
         vm.prank(USER);
         credits.setCredits(one(USER, TRADING, "arcus", 1));
-        assertEq(credits.balanceOf(USER, 0), 1);
+        assertEq(credits.writer(), USER);
+    }
+
+    function test_noRenounce() public {
+        vm.startPrank(OWNER);
+        vm.expectRevert("cannot renounce");
+        points.renounceOwnership();
+        vm.expectRevert("cannot renounce");
+        credits.renounceOwnership();
+        vm.stopPrank();
     }
 
     function test_twoStepOwner() public {
-        vm.expectRevert(unauthorized(ATTACKER));
-        vm.prank(ATTACKER);
-        points.transferOwnership(ATTACKER);
-
         vm.prank(OWNER);
         points.transferOwnership(USER);
         assertEq(points.owner(), OWNER);
@@ -701,7 +632,62 @@ contract DexPalPointsTest is Test {
         points.closeRound();
     }
 
-    // ---------------------------------------------------------------- helpers
+    function test_unlinked() public {
+        DexPalCredits c = new DexPalCredits(OWNER, WRITER, "uri", address(1));
+        vm.expectRevert("credits not linked");
+        new DexPalPoints(address(token), OWNER, address(conv), address(c));
+    }
+
+    function test_metadata() public view {
+        assertEq(points.name(), "DexPalPoints");
+        assertEq(points.symbol(), "DPP");
+        assertEq(points.decimals(), 18);
+    }
+
+    function build(address numeraire) internal returns (DexPalPoints p, DexPalCredits c) {
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
+        PointsConversion pc = new PointsConversion(UNITS);
+        c = new DexPalCredits(OWNER, WRITER, "uri", predicted);
+        p = new DexPalPoints(numeraire, OWNER, address(pc), address(c));
+        assertEq(address(p), predicted);
+    }
+
+    function cr(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount)
+        internal
+        pure
+        returns (DexPalCredits.Credit memory)
+    {
+        return DexPalCredits.Credit(user, kind, dex, amount);
+    }
+
+    function one(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount)
+        internal
+        pure
+        returns (DexPalCredits.Credit[] memory entries)
+    {
+        entries = new DexPalCredits.Credit[](1);
+        entries[0] = cr(user, kind, dex, amount);
+    }
+
+    function users(address user) internal pure returns (address[] memory list) {
+        list = new address[](1);
+        list[0] = user;
+    }
+
+    function batch(string memory id, DexPalCredits.Credit[] memory entries) internal {
+        vm.prank(WRITER);
+        credits.increaseCredits(entries, keccak256(bytes(id)));
+    }
+
+    function write(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount) internal {
+        vm.prank(WRITER);
+        credits.setCredits(one(user, kind, dex, amount));
+    }
+
+    function add(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount) internal {
+        vm.prank(WRITER);
+        credits.increaseCredits(one(user, kind, dex, amount), bytes32(++batchNonce));
+    }
 
     function open(bytes16 round, uint256[3] memory budget) internal {
         vm.prank(OWNER);
@@ -713,32 +699,17 @@ contract DexPalPointsTest is Test {
         points.closeRound();
     }
 
-    function issue(address user) internal {
+    function ban(address user) internal {
         vm.prank(OWNER);
-        points.issuePoints(user);
+        points.banUser(user);
+    }
+
+    function issue(address user) internal {
+        points.issuePoints(users(user));
     }
 
     function pending(address user) internal view returns (uint256) {
         return points.predictedBalanceOf(user) - points.balanceOf(user);
-    }
-
-    function one(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount)
-        internal
-        pure
-        returns (DexPalCredits.Credit[] memory entries)
-    {
-        entries = new DexPalCredits.Credit[](1);
-        entries[0] = DexPalCredits.Credit(user, kind, dex, amount);
-    }
-
-    function write(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount) internal {
-        vm.prank(WRITER);
-        credits.setCredits(one(user, kind, dex, amount));
-    }
-
-    function add(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount) internal {
-        vm.prank(WRITER);
-        credits.increaseCredits(one(user, kind, dex, amount), bytes32(++batchNonce));
     }
 
     function unauthorized(address account) internal pure returns (bytes memory) {

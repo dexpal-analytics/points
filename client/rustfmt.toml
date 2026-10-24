@@ -1,0 +1,3 @@
+# A table keeps one row per line (decision 0037, row C-07): rows up to the width stay whole.
+max_width = 120
+use_small_heuristics = "Max"

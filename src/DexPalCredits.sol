@@ -10,7 +10,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 interface IDexPalCredits {
     function pointsBalanceOf(address user) external view returns (uint256);
-    function withdrawPoints(address user) external;
+    function pointsContractAddress() external view returns (address);
+    function owedPoints() external view returns (uint256);
+    function withdrawPoints(address user) external returns (uint256);
     function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external;
     function closeRound() external;
     function banUser(address user) external;
@@ -25,12 +27,9 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
     }
 
     enum Kind {
-        //0
         Trading,
-        //1
         Quest,
         // 10% referral share, no ladder
-        //1
         Referral
     }
 
@@ -44,23 +43,26 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         uint256 amount;
     }
 
+    address public immutable pointsContractAddress;
     address public writer;
-    address public pointsContractAddress;
     State public state;
     bytes16 public roundName;
     EnumerableSet.AddressSet private bans;
 
     event WriterSet(address writer);
-    event PointsContractSet(address pointsContract);
     event RoundOpened(bytes16 indexed round, uint256[3] budget);
     event RoundClosed(bytes16 indexed round);
     event CreditsSet(bytes16 indexed round, address indexed user, bytes32 indexed dex, Kind kind, uint256 amount);
     event CreditsIncreased(bytes16 indexed round, address indexed user, bytes32 indexed dex, Kind kind, uint256 amount);
     event Disqualified(bytes16 indexed round, address indexed user, bool banned);
 
-    constructor(address _owner, address _writer, string memory _uri) Ownable(_owner) ERC1155(_uri) {
+    constructor(address _owner, address _writer, string memory _uri, address _pointsContract)
+        Ownable(_owner)
+        ERC1155(_uri)
+    {
         writer = _writer;
-        emit WriterSet(writer);
+        pointsContractAddress = _pointsContract;
+        emit WriterSet(_writer);
     }
 
     modifier onlyWriter() {
@@ -68,25 +70,19 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         _;
     }
 
-    function setPointsContractAddress(address newPointsContractAddress) external onlyOwner {
-        pointsContractAddress = newPointsContractAddress;
-        emit PointsContractSet(newPointsContractAddress);
-    }
-
     modifier onlyPointsContract() {
-        require(msg.sender == pointsContractAddress);
+        require(msg.sender == pointsContractAddress, "you are not the points contract");
         _;
     }
 
-    modifier nonBannedUser(address user) {
-        require(!bans.contains(user), "user is banned");
-        _;
+    function renounceOwnership() public pure override {
+        revert("cannot renounce");
     }
 
     function _update(address from, address to, uint256[] memory ids, uint256[] memory values) internal override {
-        require(
-            from == address(0) || to == address(0), "transferral is not permitted, wait until the credits become tokens"
-        );
+        // forge-lint: disable-start(require-revert-in-loop)
+        require(from == address(0) || to == address(0), "credits are not transferable");
+        // forge-lint: disable-end(require-revert-in-loop)
         super._update(from, to, ids, values);
     }
 
@@ -96,7 +92,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         address to,
         uint256[] memory ids,
         uint256[] memory values,
-        bytes memory _data,
+        bytes memory,
         bool
     ) internal override {
         _update(from, to, ids, values);
@@ -105,6 +101,20 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
     function updateWriter(address newWriter) public onlyOwner {
         writer = newWriter;
         emit WriterSet(newWriter);
+    }
+
+    function isBanned(address user) external view returns (bool) {
+        return bans.contains(user);
+    }
+
+    function bannedUsers() external view returns (address[] memory) {
+        return bans.values();
+    }
+
+    function owedPoints() external view returns (uint256 owed) {
+        for (uint256 id; id < 3; ++id) {
+            if (state == State.Open || totalSupply(id) != 0) owed += budget[Kind(id)];
+        }
     }
 
     function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external nonReentrant onlyPointsContract {
@@ -121,78 +131,63 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         state = State.Open;
     }
 
-    /// be careful, if a user has transferred credits to someone, this will oversupply
     function setCredits(Credit[] calldata entries) external nonReentrant onlyWriter {
         require(state == State.Open, "state is not open");
         for (uint256 i; i < entries.length; ++i) {
             Credit calldata c = entries[i];
             if (bans.contains(c.user)) continue;
             uint256 id = uint256(c.kind);
-            uint256 oldBalance = balanceOf(c.user, id);
-            _burn(c.user, id, oldBalance);
-            _mint(c.user, id, c.amount, abi.encodePacked(c.dex));
+            _burn(c.user, id, balanceOf(c.user, id));
+            _mint(c.user, id, c.amount, "");
             emit CreditsSet(roundName, c.user, c.dex, c.kind, c.amount);
         }
     }
 
     function increaseCredits(Credit[] calldata entries, bytes32 batchId) external nonReentrant onlyWriter {
         require(state == State.Open, "state is not open");
-        require(!processed[batchId], "bathc already processed");
+        require(!processed[batchId], "batch already processed");
         for (uint256 i; i < entries.length; ++i) {
             Credit calldata c = entries[i];
             if (bans.contains(c.user)) continue;
-            uint256 id = uint256(c.kind);
-            _mint(c.user, id, c.amount, abi.encodePacked(c.dex));
+            _mint(c.user, uint256(c.kind), c.amount, "");
             emit CreditsIncreased(roundName, c.user, c.dex, c.kind, c.amount);
         }
         processed[batchId] = true;
     }
 
-    /// called by the points contract
-    function pointsBalanceOf(address user) external view onlyPointsContract returns (uint256) {
-        if (bans.contains(user)) return 0;
-
-        uint256 pointsBalance = 0;
+    function pointsBalanceOf(address user) external view onlyPointsContract returns (uint256 points) {
         for (uint256 id; id < 3; ++id) {
-            uint256 userCredits = balanceOf(user, id);
             uint256 totalCredits = totalSupply(id);
-            if (totalCredits == 0) {
-                continue;
-            }
-            pointsBalance += Math.mulDiv(budget[Kind(id)], userCredits, totalCredits);
+            if (totalCredits == 0) continue;
+            points += Math.mulDiv(budget[Kind(id)], balanceOf(user, id), totalCredits);
         }
-        return pointsBalance;
     }
 
-    /// called by the points contract before issuing the user's points
-    function withdrawPoints(address user) public nonReentrant onlyPointsContract nonBannedUser(user) {
+    function withdrawPoints(address user) external nonReentrant onlyPointsContract returns (uint256 points) {
         require(state == State.Closed, "state needs to be closed");
-        _withdrawPoints(user);
-    }
-
-    function _withdrawPoints(address user) internal {
         for (uint256 id; id < 3; ++id) {
-            if (totalSupply(id) == 0) continue;
-            uint256 oldBalance = balanceOf(user, id);
-            uint256 p = Math.mulDiv(budget[Kind(id)], oldBalance, totalSupply(id));
-            budget[Kind(id)] -= p;
-            _burn(user, id, oldBalance);
+            uint256 totalCredits = totalSupply(id);
+            if (totalCredits == 0) continue;
+            uint256 credits = balanceOf(user, id);
+            uint256 share = Math.mulDiv(budget[Kind(id)], credits, totalCredits);
+            budget[Kind(id)] -= share;
+            points += share;
+            _burn(user, id, credits);
         }
     }
 
     function closeRound() external nonReentrant onlyPointsContract {
         require(state == State.Open, "state needs to be open");
         state = State.Closed;
+        emit RoundClosed(roundName);
     }
 
     function banUser(address user) external nonReentrant onlyPointsContract {
         require(state == State.Open, "cannot ban whilst closed");
-        bans.add(user);
+        if (!bans.add(user)) return;
         for (uint256 id; id < 3; ++id) {
-            if (totalSupply(id) == 0) continue;
-            uint256 oldBalance = balanceOf(user, id);
-            _burn(user, id, oldBalance);
+            _burn(user, id, balanceOf(user, id));
         }
+        emit Disqualified(roundName, user, true);
     }
 }
-

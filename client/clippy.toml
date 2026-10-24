@@ -1,0 +1,4 @@
+# The style's limits for one function (decision 0037, row C-03).
+too-many-lines-threshold = 100
+too-many-arguments-threshold = 7
+excessive-nesting-threshold = 4
