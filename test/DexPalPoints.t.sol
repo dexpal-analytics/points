@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.38;
+pragma solidity ^0.8.37;
 
 import {Test, stdError} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
@@ -38,7 +38,7 @@ contract DexPalPointsTest is Test {
         emit DexPalPoints.CreditsSet(R0, USER, "arcus", TRADING, 100);
         write(R0, USER, TRADING, "arcus", 100);
         assertEq(p.credits(R0, USER, TRADING, "arcus"), 100);
-        assertEq(p.userCredits(R0, USER, 0), 100);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 100);
         assertEq(p.dexCredits(R0, "arcus"), 100);
         assertEq(p.getRound(R0).total[0], 100);
     }
@@ -48,9 +48,9 @@ contract DexPalPointsTest is Test {
         write(R0, USER, TRADING, "arcus", 100);
         assertEq(p.getRound(R0).total[0], 100);
         write(R0, USER, TRADING, "arcus", 30);
-        assertEq(p.userCredits(R0, USER, 0), 30);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 30);
         write(R0, USER, TRADING, "arcus", 0);
-        assertEq(p.userCredits(R0, USER, 0), 0);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 0);
         assertEq(p.dexCredits(R0, "arcus"), 0);
         assertEq(p.getRound(R0).total[0], 0);
     }
@@ -107,7 +107,7 @@ contract DexPalPointsTest is Test {
         emit DexPalPoints.CreditsSet(R0, USER, "arcus", TRADING, 9);
         vm.prank(WRITER);
         p.setCredits(R0, batch);
-        assertEq(p.userCredits(R0, USER, 0), 9);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 9);
     }
 
     function test_empty() public {
@@ -136,7 +136,7 @@ contract DexPalPointsTest is Test {
         vm.prank(WRITER);
         vm.expectRevert(stdError.arithmeticError);
         p.setCredits(R0, batch);
-        assertEq(p.userCredits(R0, OTHER, 1), 0);
+        assertEq(p.getUserCredits(R0, OTHER, QUEST), 0);
     }
 
     function test_batch() public {
@@ -148,7 +148,7 @@ contract DexPalPointsTest is Test {
         uint256 start = gasleft();
         p.setCredits(R0, batch);
         assertLt(start - gasleft(), TX_GAS_CAP / 2);
-        assertEq(p.userCredits(R0, address(200), 0), 200);
+        assertEq(p.getUserCredits(R0, address(200), TRADING), 200);
     }
 
     function test_onlyWriter() public {
@@ -208,8 +208,8 @@ contract DexPalPointsTest is Test {
         batch[1] = DexPalPoints.Credit(OTHER, TRADING, "aster", 20);
         vm.prank(WRITER);
         p.setCredits(R0, batch);
-        assertEq(p.userCredits(R0, USER, 0), 30);
-        assertEq(p.userCredits(R0, OTHER, 0), 20);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 30);
+        assertEq(p.getUserCredits(R0, OTHER, TRADING), 20);
 
         vm.expectRevert(unauthorized(WRITER));
         vm.prank(WRITER);
@@ -264,7 +264,7 @@ contract DexPalPointsTest is Test {
         write(R0, USER, TRADING, "arcus", 1);
         vm.prank(USER);
         p.setCredits(R0, one(USER, TRADING, "arcus", 1));
-        assertEq(p.userCredits(R0, USER, 0), 1);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 1);
 
         vm.prank(OWNER);
         p.setWriter(address(0));
@@ -328,7 +328,7 @@ contract DexPalPointsTest is Test {
         vm.prank(OWNER);
         p.upgradeToAndCall(next, "");
         assertEq(address(uint160(uint256(vm.load(address(p), ERC1967Utils.IMPLEMENTATION_SLOT)))), next);
-        assertEq(p.userCredits(R0, USER, 0), 42);
+        assertEq(p.getUserCredits(R0, USER, TRADING), 42);
         assertEq(p.writer(), WRITER);
         assertEq(p.owner(), OWNER);
     }
