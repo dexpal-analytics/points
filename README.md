@@ -1,6 +1,10 @@
-# DexPal Points
+# DexPal Points Contract Suite
 
 DexPal Points distribution on [Robinhood Chain](https://docs.robinhood.com/chain).
+
+## Preamble
+
+As an improvement to our rewards system, we are moving the points accounting on chain. Our backend will still receive user activity from our partner DEXes, but the rounds, credit assignment and point calculations can all easily fit inside a few smart contracts, as can the USDG redemption of points.
 
 ## Credit types
 
@@ -24,32 +28,41 @@ Points figures estimated until the round ends.
 
 | Call | Who | Does |
 |---|---|---|
-| `openRound(round, [trading, quest, referral])` | owner | Opens a round with its budgets |
-| `setCredits(round, [(wallet, kind, dex, credits), ...])` | writer | Records Credits (while the round is open) |
-| `disqualify(round, wallet)` | owner or writer | Voids the wallet's Points in an open round (+ban) |
-| `requalify(round, wallet)` | owner | Undoes a disqualification |
-| `closeRound(round)` | owner | Freezes the round. Its Points become final |
+| `openRound([trading, quest, referral])` | owner | Opens a round with its budgets |
+| `increaseCredits([(wallet, kind, dex, credits), ...])` | writer | updates Credits (while the round is open) |
+| `ban(wallet)` | owner or writer | Voids the wallet's Points (+ban) |
+| `closeRound(round)` | owner | Freezes the round. Its Points become final, and the credits are burned |
 
 A disqualified wallet's share is not reallocated in the current round.
-
-`setCredits` overwrites, so resending a batch changes nothing, and writing 0 takes Credits back.
-Keep batches to 200 entries. A transaction is capped at 32M gas, and 200 new entries cost about
-10.6M.
 
 IDs are `0` trading, `1` quest,
 `2` referral.
 
 ## Reading
 
+**DexPalPoints**
+
 | Call | Returns |
 |---|---|
-| `points(round, wallet)` | A wallet's Points in one round |
-| `lifetime(wallet)` | A wallet's Points across all closed rounds |
-| `getRound(round)` | The budgets, the total Credits per kind, and the state |
-| `userCredits(round, wallet, kind)` | A wallet's Credits of one kind |
-| `dexCredits(round, dex)` | All trading Credits earned through one dex, for statistics |
-| `credits(round, wallet, kind, dex)` | One recorded entry |
-| `disqualified(round, wallet)`, `disqualifiedUsers(round)` | Whether a wallet is banned for the round, and every banned wallet |
+| `predictedBalanceOf(wallet)` | A wallet's issued Points plus its pending share of the current round |
+| `predictedBalanceOfConverted(wallet)` | The same, converted to the numeraire |
+| `balanceOf(wallet)` | Points already issued and claimable now |
+| `balanceOfConverted(wallet)` | The numeraire a claim would pay out right now |
+| `totalSupply()` | All issued, unclaimed Points |
+| `numeraire()`, `pointsConversion()`, `creditsContractAddress()` | The payout token, the conversion contract and the linked Credits contract |
+
+**DexPalCredits**
+
+| Call | Returns |
+|---|---|
+| `roundName()`, `state()` | The current round and whether it's `Open` or `Closed` |
+| `budget(kind)` | The kind's remaining budget for the current round (this falls as wallets are issued after close) |
+| `balanceOf(wallet, kind)` | A wallet's Credits of one kind in the current round |
+| `totalSupply(kind)` | All outstanding Credits of one kind |
+| `processed(batchId)` | Whether a credit batch has already been applied |
+| `writer()`, `pointsContractAddress()` | The backend writer and the linked Points contract |
+
+Kinds are `0` = Trading, `1` = Quest, `2` = Referral.
 
 ## Roles
 
