@@ -1,12 +1,13 @@
 [profile.default]
+solc = "0.8.36"
 libs = ["dependencies"]
 ignored_warnings_from = ["dependencies"]
 evm_version = "cancun"
 optimizer = true
 remappings = [
-    "forge-std/=dependencies/forge-std-1.17.0/src/",
-    "@openzeppelin/contracts/=dependencies/@openzeppelin-contracts-5.7.0/",
-    "@openzeppelin/contracts-upgradeable/=dependencies/@openzeppelin-contracts-upgradeable-5.7.0/",
+  "forge-std/=dependencies/forge-std-1.17.0/src/",
+  "@openzeppelin/contracts/=dependencies/@openzeppelin-contracts-5.7.0/",
+  "@openzeppelin/contracts-upgradeable/=dependencies/@openzeppelin-contracts-upgradeable-5.7.0/",
 ]
 
 [lint]

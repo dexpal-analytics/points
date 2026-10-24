@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.37;
+pragma solidity ^0.8.35;
 
 import {Test, stdError} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -62,6 +62,221 @@ contract DexPalPointsTest is Test {
         credits.setPointsContractAddress(address(points));
         token.mint(address(points), 1e30);
         open(R0, [uint256(250_000), 100_000, 150_000]);
+    }
+
+    // -------------------------------------------------------------------- e2e
+
+    /// Full lifecycle across three rounds with four users:
+    ///   alice - trader on two dexes
+    ///   bob   - trader + quester, holds points across rounds before claiming
+    ///   carol - quester + referrer, claims to a separate cold wallet
+    ///   dave  - cheater, banned mid-round 0, stays banned forever
+    ///
+    /// All budgets and credit amounts are chosen so the pro-rata shares divide
+    /// exactly, letting every assertion be an exact equality.
+    function test_e2e_multiRound() public {
+        address alice = makeAddr("alice");
+        address bob = makeAddr("bob");
+        address carol = makeAddr("carol");
+        address carolCold = makeAddr("carolCold");
+        address dave = makeAddr("dave");
+        bytes16 R2 = bytes16(uint128(0xA2));
+        bytes16 R3 = bytes16(uint128(0xA3));
+        DexPalCredits.Credit[] memory b;
+
+        // =====================================================================
+        // ROUND 0 - budgets: Trading 250k, Quest 100k, Referral 150k (opened in setUp)
+        // =====================================================================
+
+        // --- Batch r0:b1: first sync from the backend -------------------------
+        b = new DexPalCredits.Credit[](4);
+        b[0] = cr(alice, TRADING, "arcus", 300);
+        b[1] = cr(bob, TRADING, "aster", 100);
+        b[2] = cr(carol, QUEST, "arcus", 50);
+        b[3] = cr(dave, TRADING, "arcus", 500);
+        batch("r0:b1", b);
+
+        // Carol is the only quester so far, so she'd take the entire quest budget.
+        assertEq(pending(carol), 100_000);
+
+        // --- Batch r0:b2: incremental deltas ---------------------------------
+        b = new DexPalCredits.Credit[](4);
+        b[0] = cr(alice, TRADING, "aster", 100); // second dex: adds to her arcus 300 -> 400
+        b[1] = cr(bob, QUEST, "aster", 50);
+        b[2] = cr(carol, REFERRAL, 0, 10);
+        b[3] = cr(dave, REFERRAL, 0, 10);
+        batch("r0:b2", b);
+        assertEq(credits.balanceOf(alice, 0), 400);
+
+        // Supplies now: Trading 1000 (a400 b100 d500), Quest 100 (c50 b50), Referral 20 (c10 d10).
+        assertEq(pending(alice), 100_000); // 250k * 400/1000
+        assertEq(pending(bob), 25_000 + 50_000); // trading 100/1000 + quest 50/100
+        assertEq(pending(carol), 50_000 + 75_000); // quest 50/100 + referral 10/20
+        assertEq(pending(dave), 125_000 + 75_000); // trading 500/1000 + referral 10/20
+
+        // --- Backend retries r0:b2 (e.g. RPC timeout) -------------------------
+        // The batch id was already consumed, so the retry is rejected and nobody
+        // is double-credited.
+        vm.expectRevert("bathc already processed");
+        batch("r0:b2", b);
+        assertEq(credits.balanceOf(alice, 0), 400);
+
+        // --- Dave is caught wash trading and banned mid-round -----------------
+        // His credits are burned, which shrinks the supplies, so his share is
+        // redistributed pro-rata to everyone else rather than left unpaid.
+        vm.prank(OWNER);
+        points.banUser(dave);
+        assertEq(pending(dave), 0);
+        assertEq(credits.totalSupply(0), 500); // a400 b100
+        assertEq(credits.totalSupply(2), 10); // c10
+        assertEq(pending(alice), 200_000); // 250k * 400/500 (doubled)
+        assertEq(pending(carol), 50_000 + 150_000); // now sole referrer
+
+        // --- Backend keeps sending dave's activity; it's silently skipped ------
+        b = new DexPalCredits.Credit[](1);
+        b[0] = cr(dave, TRADING, "arcus", 1000);
+        batch("r0:b3", b);
+        assertEq(credits.balanceOf(dave, 0), 0);
+        assertEq(credits.totalSupply(0), 500);
+
+        // --- Correction: backend recomputes carol's quest total as 150 ---------
+        // setCredits overwrites the per-kind balance, so it's the tool for fixes.
+        write(carol, QUEST, "arcus", 150);
+        // Quest supply: c150 b50 = 200.
+
+        // Final round-0 entitlements (sum = full 500k budget):
+        //   alice 200k = trading 400/500
+        //   bob    75k = trading 100/500 (50k) + quest 50/200 (25k)
+        //   carol 225k = quest 150/200 (75k) + referral 10/10 (150k)
+        assertEq(pending(alice), 200_000);
+        assertEq(pending(bob), 75_000);
+        assertEq(pending(carol), 225_000);
+
+        // --- Close round 0 ---------------------------------------------------
+        close();
+
+        // Credits are frozen: no more writes or bans.
+        vm.expectRevert("state is not open");
+        write(alice, TRADING, "arcus", 1);
+        vm.expectRevert("cannot ban whilst closed");
+        vm.prank(OWNER);
+        points.banUser(alice);
+
+        // Can't start round 1 while anyone still holds round-0 credits; that
+        // would let them roll into the new budget.
+        vm.expectRevert("remaining user credits left");
+        open(R1, [uint256(100_000), 0, 50_000]);
+
+        // --- Convert credits -> DPP for every holder -------------------------
+        // Order doesn't matter: each withdrawal subtracts its payout from the
+        // budget as it burns, so later users' shares are unchanged.
+        issue(carol);
+        issue(alice);
+        issue(bob);
+        // Dave holds no credits, so he doesn't need issuing.
+        assertEq(points.balanceOf(alice), 200_000);
+        assertEq(points.balanceOf(bob), 75_000);
+        assertEq(points.balanceOf(carol), 225_000);
+        assertEq(points.totalSupply(), 500_000);
+
+        // Every credit burned and every budget paid out to the wei.
+        for (uint256 id; id < 3; ++id) {
+            assertEq(credits.totalSupply(id), 0);
+            assertEq(credits.budget(DexPalCredits.Kind(id)), 0);
+        }
+
+        // --- Claims ----------------------------------------------------------
+        // Alice claims straight away; carol sends to her cold wallet; bob waits.
+        uint256 aliceExpected = conv.convertPoints(200_000);
+        uint256 carolExpected = conv.convertPoints(225_000);
+        vm.prank(alice);
+        points.claimPoints(alice, alice);
+        vm.prank(carol);
+        points.claimPoints(carol, carolCold);
+        assertEq(token.balanceOf(alice), aliceExpected);
+        assertEq(token.balanceOf(carolCold), carolExpected);
+        assertEq(points.balanceOf(alice), 0);
+        assertEq(points.balanceOf(carol), 0);
+
+        // =====================================================================
+        // ROUND 1 - budgets: Trading 100k, Quest 0, Referral 50k
+        // =====================================================================
+        open(R1, [uint256(100_000), 0, 50_000]);
+        assertEq(credits.roundName(), R1);
+
+        // Batch ids are global, not per round, so the backend must namespace
+        // them by round. Reusing a round-0 id is rejected.
+        b = new DexPalCredits.Credit[](1);
+        b[0] = cr(alice, TRADING, "arcus", 1);
+        vm.expectRevert("bathc already processed");
+        batch("r0:b1", b);
+
+        b = new DexPalCredits.Credit[](4);
+        b[0] = cr(alice, TRADING, "arcus", 1);
+        b[1] = cr(bob, TRADING, "aster", 3);
+        b[2] = cr(dave, TRADING, "arcus", 5); // still banned: skipped
+        b[3] = cr(carol, REFERRAL, 0, 1);
+        batch("r1:b1", b);
+        assertEq(credits.balanceOf(dave, 0), 0);
+
+        assertEq(pending(alice), 25_000); // 100k * 1/4
+        assertEq(pending(bob), 75_000); // 100k * 3/4
+        assertEq(pending(carol), 50_000); // sole referrer
+        // Bob's prediction combines his unclaimed round-0 DPP with round-1 pending.
+        assertEq(points.predictedBalanceOf(bob), 75_000 + 75_000);
+
+        close();
+        issue(alice);
+        issue(bob);
+        issue(carol);
+        assertEq(points.balanceOf(bob), 150_000);
+
+        // Bob claims both rounds in one go.
+        uint256 bobExpected = conv.convertPoints(150_000);
+        vm.prank(bob);
+        points.claimPoints(bob, bob);
+        assertEq(token.balanceOf(bob), bobExpected);
+
+        aliceExpected += conv.convertPoints(25_000);
+        carolExpected += conv.convertPoints(50_000);
+        vm.prank(alice);
+        points.claimPoints(alice, alice);
+        vm.prank(carol);
+        points.claimPoints(carol, carolCold);
+        assertEq(token.balanceOf(alice), aliceExpected);
+        assertEq(token.balanceOf(carolCold), carolExpected);
+
+        // Everything issued has been claimed.
+        assertEq(points.totalSupply(), 0);
+        assertEq(token.balanceOf(address(points)), 1e30 - aliceExpected - bobExpected - carolExpected);
+        assertEq(token.balanceOf(dave), 0);
+
+        // =====================================================================
+        // ROUNDS 2-3 - an empty round cycles cleanly
+        // =====================================================================
+        // No credits written, so supply stays 0 and the next round can open
+        // immediately. R2's unspent budget is simply overwritten.
+        open(R2, [uint256(1), 1, 1]);
+        close();
+        open(R3, [uint256(10), 10, 10]);
+        assertEq(uint8(credits.state()), uint8(DexPalCredits.State.Open));
+        assertEq(credits.roundName(), R3);
+        assertEq(credits.budget(TRADING), 10);
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    function cr(address user, DexPalCredits.Kind kind, bytes32 dex, uint256 amount)
+        internal
+        pure
+        returns (DexPalCredits.Credit memory)
+    {
+        return DexPalCredits.Credit(user, kind, dex, amount);
+    }
+
+    function batch(string memory id, DexPalCredits.Credit[] memory entries) internal {
+        vm.prank(WRITER);
+        credits.increaseCredits(entries, keccak256(bytes(id)));
     }
 
     // ---------------------------------------------------------------- credits
