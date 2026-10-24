@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity 0.8.38;
+pragma solidity ^0.8.37;
 
 import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
@@ -38,7 +38,9 @@ contract DexPalPoints is Ownable2StepUpgradeable, UUPSUpgradeable {
     address public writer;
     bytes16[] internal roundIds;
     mapping(bytes16 round => Round) internal rounds;
-    mapping(bytes16 round => mapping(address user => uint256[3])) public userCredits;
+    mapping(bytes16 round => mapping(address user => uint256[3])) private userCredits;
+
+    /// don't know what dexCredits is used for, assigned to but never read.
     mapping(bytes16 round => mapping(bytes32 dex => uint256)) public dexCredits;
     mapping(bytes16 round => mapping(address user => mapping(Kind kind => mapping(bytes32 dex => uint256)))) public
         credits;
@@ -98,7 +100,9 @@ contract DexPalPoints is Ownable2StepUpgradeable, UUPSUpgradeable {
             uint256 old = credits[round][c.user][c.kind][c.dex];
             credits[round][c.user][c.kind][c.dex] = c.amount;
             // Overwrites, so every total moves by the difference and a resent batch changes nothing.
-            userCredits[round][c.user][k] = userCredits[round][c.user][k] - old + c.amount;
+            setUserCredits(round, c.user, c.kind, c.amount);
+            /// big problem; a credit reduces in value throughout the liftime as more ar minted.
+            //-is this intentional???
             r.total[k] = r.total[k] - old + c.amount;
             if (c.kind == Kind.Trading) dexCredits[round][c.dex] = dexCredits[round][c.dex] - old + c.amount;
             emit CreditsSet(round, c.user, c.dex, c.kind, c.amount);
@@ -136,6 +140,11 @@ contract DexPalPoints is Ownable2StepUpgradeable, UUPSUpgradeable {
         revert("cannot renounce");
     }
 
+    function getUserCredits(bytes16 round, address user, Kind kind) public view returns (uint256) {
+        uint256 k = uint256(kind);
+        return userCredits[round][user][k];
+    }
+
     function _setDisqualified(bytes16 round, address user, bool banned) private {
         _open(round);
         if (banned) bans[round].add(user);
@@ -143,10 +152,16 @@ contract DexPalPoints is Ownable2StepUpgradeable, UUPSUpgradeable {
         emit Disqualified(round, user, banned);
     }
 
-    function _open(bytes16 round) private view returns (Round storage r) {
-        r = rounds[round];
+    function _open(bytes16 round) private view returns (Round storage) {
+        Round storage r = rounds[round];
         require(r.state == State.Open, "round not open");
+        return r;
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner {}
+
+    function setUserCredits(bytes16 round, address user, Kind kind, uint256 amount) internal {
+        uint256 k = uint256(kind);
+        userCredits[round][user][k] = amount;
+    }
 }
