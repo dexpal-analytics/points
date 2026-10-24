@@ -15,6 +15,11 @@ points(round, wallet) = Σ over kinds of  budget[kind] × credits(wallet, kind) 
 
 Points figures estimated until the round ends.
 
+## Contract Addresses Robinhood Testnet
+
+- Points Contract: 0xcbfb4f85eedcf32b94b2db6121588ac508d0ef05
+- Credits Contract: 0x384d86a09fa21fd010223ceb8bf04b3025d86e92
+
 ## Rounds
 
 | Call | Who | Does |
