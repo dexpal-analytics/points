@@ -82,15 +82,32 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
         _;
     }
 
+    function _update(address from, address to, uint256[] memory ids, uint256[] memory values) internal override {
+        require(
+            from == address(0) || to == address(0), "transferral is not permitted, wait until the credits become tokens"
+        );
+        super._update(from, to, ids, values);
+    }
+
+    function _updateWithAcceptanceCheck(
+        address from,
+        address to,
+        uint256[] memory ids,
+        uint256[] memory values,
+        bytes memory _data
+    ) internal override {
+        _update(from, to, ids, values);
+    }
+
     function updateWriter(address newWriter) public onlyOwner {
         writer = newWriter;
         emit WriterSet(newWriter);
     }
 
     function openRound(bytes16 _roundName, uint256[3] calldata newBudget) external nonReentrant onlyPointsContract {
-        for  (uint8 i; i < 3; ++i) { 
-        require(totalSupply(id);)
-        }
+        require(totalSupply(0) == 0, "remaining user credits left");
+        require(totalSupply(1) == 0, "remaining user credits left");
+        require(totalSupply(2) == 0, "remaining user credits left");
 
         require(state == State.Closed, "call closeRound first");
         roundName = _roundName;
@@ -118,8 +135,8 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
     function increaseCredits(Credit[] calldata entries) external nonReentrant onlyWriter {
         require(state == State.Open, "state is not open");
         for (uint256 i; i < entries.length; ++i) {
-            if (bans.contains(c.user)) continue;
             Credit calldata c = entries[i];
+            if (bans.contains(c.user)) continue;
             uint256 id = uint256(c.kind);
             _mint(c.user, id, c.amount, abi.encodePacked(c.dex));
             emit CreditsIncreased(roundName, c.user, c.dex, c.kind, c.amount);
@@ -164,6 +181,7 @@ contract DexPalCredits is ERC1155Supply, IDexPalCredits, Ownable2Step, Reentranc
     }
 
     function banUser(address user) external nonReentrant onlyPointsContract {
+        require(state == State.Open, "cannot ban whilst closed");
         bans.add(user);
         for (uint256 id; id < 3; ++id) {
             if (totalSupply(id) == 0) continue;

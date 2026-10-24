@@ -6,6 +6,7 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeab
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IDexPalCredits} from "./DexPalCredits.sol";
 
@@ -14,6 +15,7 @@ interface IPointsConversion {
 }
 
 contract DexPalPoints is ERC20, Ownable2Step, ReentrancyGuard {
+    using SafeERC20 for ERC20;
     address public numeraire;
     address public pointsConversion;
     address public creditsContractAddress;
@@ -51,8 +53,7 @@ contract DexPalPoints is ERC20, Ownable2Step, ReentrancyGuard {
         uint256 numeraireToTransfer = balanceOfConverted(from);
         uint256 balance = balanceOf(from);
         _burn(from, balance);
-        bool success = ERC20(numeraire).transfer(to, numeraireToTransfer);
-        require(success, "Points Claim Failed");
+        ERC20(numeraire).safeTransfer(to, numeraireToTransfer);
     }
 
     function issuePoints(address user) external nonReentrant onlyOwner {
