@@ -4,3 +4,6 @@ dependencies/
 broadcast/
 .env*
 **/target/*
+soljson*.js
+*.hex
+*-input.json
