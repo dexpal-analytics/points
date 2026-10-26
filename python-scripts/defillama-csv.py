@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""
-Reproduce DefiLlama's protocol-page ".csv" button.
-
-The button does no server-side export: it serialises the chart data the page
-already fetched from a public, unauthenticated endpoint into a Blob. So no
-login / PocketBase token is needed - just hit that endpoint.
-
-Usage:
-    python defillama_csv.py https://defillama.com/protocol/01-exchange
-    python defillama_csv.py 01-exchange --kind adapter --adapter-type derivatives -o out.csv
-"""
 import argparse
 import csv
 import sys
@@ -46,11 +35,10 @@ def fetch(slug: str, kind: str, adapter_type: str | None) -> list[list[float]]:
 
 def run(exchange: str) -> pl.DataFrame:
     rows = fetch(exchange, "adapter", "fees")
-    df_fees = pl.DataFrame(rows, schema=["timestamp", "fees"], orient="row").cast({"timestamp": pl.Int64, "fees": pl.Int64})
+    df_fees = pl.DataFrame(rows, schema=["timestamp", "fees"], orient="row").cast({"timestamp": pl.Int64, "fees": pl.Int64}).with_columns(pl.from_epoch("timestamp", time_unit="s").dt.date().alias("date"))
     rows = fetch(exchange, "adapter", "derivatives")
-    df_volume = pl.DataFrame(rows, schema=["timestamp", "perp_volume"], orient="row").cast({"timestamp": pl.Int64, "perp_volume": pl.Int64})
-    df = df_fees.join(df_volume, on="timestamp", how="full", coalesce=True, suffix="_right").sort("timestamp")
-    df = df.with_columns(pl.from_epoch("timestamp", time_unit="s").dt.date().alias("date"))
+    df_volume = pl.DataFrame(rows, schema=["timestamp", "perp_volume"], orient="row").cast({"timestamp": pl.Int64, "perp_volume": pl.Int64}).with_columns(pl.from_epoch("timestamp", time_unit="s").dt.date().alias("date"))
+    df = df_fees.join(df_volume, on="date", how="full", coalesce=True, suffix="_right").sort("date")
     df = df.with_columns(pl.lit(exchange).alias("exchange"))
     return df
 
@@ -81,4 +69,4 @@ if __name__ == "__main__":
         df.write_csv("last_one.csv")
         df_total = df_total.vstack(df)
     df_total = df_total.sort("timestamp")
-    df_total.write_csv("all_exchanges_fees_volume.csv")
+    df_total.write_csv("all_exchanges_fees_volume2.csv")

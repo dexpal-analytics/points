@@ -4,6 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
     "curl-cffi>=0.16.3",
+    "jupyterlab-vim>=4.1.4",
+    "matplotlib>=3.11.2",
     "nbstripout>=0.9.1",
     "notebook>=7.6.3",
     "polars>=2.0.0",
